@@ -1,14 +1,10 @@
 // ============================================================================
-// ZeusMod Auto Dumper
-// Automatically finds all offsets and signatures after game updates
+// IcarusDumper - Auto Offset & AOB Finder
+// Made by CyberSnake
 //
-// Methods:
-//   1. Parse UE4SS CXXHeaderDump for class field offsets
-//   2. Load PDB symbols for function offsets
-//   3. Scan binary for AOB signatures
-//   4. Output offsets.json used by the trainer at runtime
-//
-// Usage: AutoDumper.exe [--game-path "C:\...\Icarus"] [--dump-path "C:\...\CXXHeaderDump"]
+// 1. UE4SS CXXHeaderDump -> class field offsets
+// 2. PDB Symbols -> function addresses
+// 3. Binary .text -> AOB for every write instruction + function prologue
 // ============================================================================
 
 #include <Windows.h>
@@ -20,460 +16,443 @@
 #include <vector>
 #include <map>
 #include <fstream>
-#include <filesystem>
 
 #pragma comment(lib, "dbghelp.lib")
 
-namespace fs = std::filesystem;
-
-// ============================================================================
-// Config
-// ============================================================================
-
-struct GameConfig {
-    std::string gamePath;
-    std::string dumpPath;
-    std::string exeName = "Icarus-Win64-Shipping.exe";
-    std::string pdbName = "Icarus-Win64-Shipping.pdb";
+// ── SDK Fields to find ──
+struct FQ { const char *cls, *field, *key; };
+static const FQ FIELDS[] = {
+    {"UActorState","Health","health"}, {"UActorState","MaxHealth","maxHealth"},
+    {"UActorState","Armor","armor"}, {"UActorState","MaxArmor","maxArmor"},
+    {"UActorState","Shelter","shelter"}, {"UActorState","CurrentAliveState","aliveState"},
+    {"UCharacterState","Stamina","stamina"}, {"UCharacterState","MaxStamina","maxStamina"},
+    {"UCharacterState","TotalExperience","totalXP"}, {"UCharacterState","Level","level"},
+    {"USurvivalCharacterState","OxygenLevel","oxygen"},
+    {"USurvivalCharacterState","WaterLevel","water"},
+    {"USurvivalCharacterState","FoodLevel","food"},
+    {"USurvivalCharacterState","MaxOxygen","maxOxygen"},
+    {"USurvivalCharacterState","MaxWater","maxWater"},
+    {"USurvivalCharacterState","MaxFood","maxFood"},
+    {"USurvivalCharacterState","InternalTemperature","internalTemp"},
+    {"USurvivalCharacterState","RadiationLevel","radiation"},
+    {"AIcarusCharacter","ActorState","charActorState"},
+    {"AIcarusCharacter","StatContainer","charStatContainer"},
+    {"UWorld","GameInstance","worldGameInstance"},
+    {"UWorld","GameState","worldGameState"},
+    {"UGameInstance","LocalPlayers","giLocalPlayers"},
+    {"UPlayer","PlayerController","playerController"},
+    {"AController","Character","ctrlCharacter"},
+    {"AIcarusGameStateSurvival","TimeOfDay","gsTimeOfDay"},
+    {"AActor","CustomTimeDilation","actorTimeDilation"},
+    {"ACharacter","CharacterMovement","charMovement"},
+    {"UCharacterMovementComponent","MaxWalkSpeed","maxWalkSpeed"},
+    {"UCharacterMovementComponent","MovementMode","movementMode"},
+    {"UCharacterMovementComponent","MaxFlySpeed","maxFlySpeed"},
+    {"UInventory","CurrentWeight","invCurrentWeight"},
+    {"UInventory","Slots","invSlots"},
 };
+static constexpr int NF = sizeof(FIELDS) / sizeof(FIELDS[0]);
+
+// ── Functions to find via PDB ──
+struct FnQ { const char *cls, *func, *key; };
+static const FnQ FUNCS[] = {
+    {"UCraftingFunctionLibrary","GetScaledRecipeInputCount","fnScaledInputCount"},
+    {"UCraftingFunctionLibrary","GetScaledRecipeResourceItemCount","fnScaledResourceCount"},
+    {"UCraftingFunctionLibrary","GetStatBasedResourceCostMultiplier","fnCostMultiplier"},
+    {"UInventory","FindItemCountByType","fnFindItemCount"},
+    {"UInventory","ConsumeItem","fnConsumeItem"},
+    {"UInventory","RemoveItem","fnRemoveItem"},
+    {"UInventory","GetItemCount","fnGetItemCount"},
+    {"UInventoryComponent","GetTotalWeight","fnGetTotalWeight"},
+    {"UActorState","SetHealth","fnSetHealth"},
+    {"UActorState","TakeDamage","fnTakeDamage"},
+    {"UActorState","SetArmor","fnSetArmor"},
+    {"UCharacterState","SetStamina","fnSetStamina"},
+    {"UCharacterState","AddStamina","fnAddStamina"},
+    {"USurvivalCharacterState","SetOxygen","fnSetOxygen"},
+    {"USurvivalCharacterState","SetWater","fnSetWater"},
+    {"USurvivalCharacterState","SetFood","fnSetFood"},
+    {"UProcessorComponent","CanSatisfyRecipeInput","fnCanSatisfyInput"},
+    {"UProcessorComponent","CanQueueItem","fnCanQueueItem"},
+    {"UProcessorComponent","HasSufficientResource","fnHasSufficient"},
+    {"AIcarusCharacter","TryApplyFallDamage","fnFallDamage"},
+};
+static constexpr int NFn = sizeof(FUNCS) / sizeof(FUNCS[0]);
+
+// ── Known AOBs to verify ──
+struct AQ { const char *name, *pat, *key; };
+static const AQ AOBS[] = {
+    {"GWorld", "48 8B 1D ?? ?? ?? ?? 48 85 DB 74", "aobGWorld"},
+    {"SetHealth", "79 04 33 ?? EB 09 41 8B ?? 41 3B ?? 0F 4C ?? 89 ?? D8 01 00 00", "aobSetHealth"},
+    {"ConsumeItem", "48 3B F9 75 F2 44 29 66 04 E9", "aobConsumeItem"},
+    {"SetStamina", "85 ?? 79 04 33 ?? EB 05 3B ?? 0F 4C ?? 89 ?? 78 02 00 00", "aobSetStamina"},
+    {"GNames", "48 8D 05 ?? ?? ?? ?? EB ?? 48 8D 0D ?? ?? ?? ?? E8", "aobGNames"},
+};
+static constexpr int NA = sizeof(AOBS) / sizeof(AOBS[0]);
+
+// ── Global binary data ──
+static std::vector<uint8_t> g_text;
 
 // ============================================================================
-// Offset definitions - what we need to find
+// 1. Parse UE4SS Headers
 // ============================================================================
-
-struct FieldQuery {
-    const char* className;
-    const char* fieldName;
-    const char* jsonKey;
-};
-
-static const FieldQuery FIELD_QUERIES[] = {
-    // UActorState
-    {"UActorState", "Health", "health"},
-    {"UActorState", "MaxHealth", "maxHealth"},
-    {"UActorState", "Armor", "armor"},
-    {"UActorState", "MaxArmor", "maxArmor"},
-    {"UActorState", "Shelter", "shelter"},
-    {"UActorState", "CurrentAliveState", "aliveState"},
-
-    // UCharacterState
-    {"UCharacterState", "Stamina", "stamina"},
-    {"UCharacterState", "MaxStamina", "maxStamina"},
-    {"UCharacterState", "TotalExperience", "totalXP"},
-    {"UCharacterState", "Level", "level"},
-
-    // USurvivalCharacterState
-    {"USurvivalCharacterState", "OxygenLevel", "oxygen"},
-    {"USurvivalCharacterState", "WaterLevel", "water"},
-    {"USurvivalCharacterState", "FoodLevel", "food"},
-    {"USurvivalCharacterState", "MaxOxygen", "maxOxygen"},
-    {"USurvivalCharacterState", "MaxWater", "maxWater"},
-    {"USurvivalCharacterState", "MaxFood", "maxFood"},
-
-    // AIcarusCharacter
-    {"AIcarusCharacter", "ActorState", "charActorState"},
-    {"AIcarusCharacter", "StatContainer", "charStatContainer"},
-
-    // UWorld
-    {"UWorld", "GameInstance", "worldGameInstance"},
-    {"UWorld", "GameState", "worldGameState"},
-
-    // UGameInstance
-    {"UGameInstance", "LocalPlayers", "giLocalPlayers"},
-
-    // UPlayer
-    {"UPlayer", "PlayerController", "playerController"},
-
-    // AController
-    {"AController", "Character", "ctrlCharacter"},
-
-    // AIcarusGameStateSurvival
-    {"AIcarusGameStateSurvival", "TimeOfDay", "gsTimeOfDay"},
-
-    // AActor
-    {"AActor", "CustomTimeDilation", "actorTimeDilation"},
-
-    // ACharacter
-    {"ACharacter", "CharacterMovement", "charMovement"},
-
-    // UCharacterMovementComponent
-    {"UCharacterMovementComponent", "MaxWalkSpeed", "maxWalkSpeed"},
-    {"UCharacterMovementComponent", "MovementMode", "movementMode"},
-};
-
-static const int NUM_FIELDS = sizeof(FIELD_QUERIES) / sizeof(FIELD_QUERIES[0]);
-
-struct FuncQuery {
-    const char* className;
-    const char* funcName;
-    const char* jsonKey;
-};
-
-static const FuncQuery FUNC_QUERIES[] = {
-    {"UCraftingFunctionLibrary", "GetScaledRecipeInputCount", "fnScaledInputCount"},
-    {"UCraftingFunctionLibrary", "GetScaledRecipeResourceItemCount", "fnScaledResourceCount"},
-    {"UInventory", "FindItemCountByType", "fnFindItemCount"},
-    {"UInventoryComponent", "GetTotalWeight", "fnGetTotalWeight"},
-    {"UInventory", "ConsumeItem", "fnConsumeItem"},
-    {"UActorState", "SetHealth", "fnSetHealth"},
-    {"UCharacterState", "SetStamina", "fnSetStamina"},
-};
-
-static const int NUM_FUNCS = sizeof(FUNC_QUERIES) / sizeof(FUNC_QUERIES[0]);
-
-// ============================================================================
-// 1. Parse UE4SS CXXHeaderDump
-// ============================================================================
-
-std::map<std::string, uint64_t> parseUE4SSHeaders(const std::string& dumpDir) {
-    std::map<std::string, uint64_t> offsets;
-
-    // Files to parse
-    std::vector<std::string> files = {"Icarus.hpp", "Engine.hpp", "CoreUObject.hpp"};
-
-    for (auto& filename : files) {
-        std::string filepath = dumpDir + "/" + filename;
-        std::ifstream file(filepath);
-        if (!file.is_open()) {
-            printf("[WARN] Cannot open %s\n", filepath.c_str());
-            continue;
-        }
-
-        std::string line;
-        std::string currentClass;
-
-        while (std::getline(file, line)) {
-            // Detect class definition: "class UActorState : public ..."
+std::map<std::string, uint64_t> parseHeaders(const std::string& dir) {
+    std::map<std::string, uint64_t> r;
+    const char* files[] = {"Icarus.hpp", "Engine.hpp", "CoreUObject.hpp"};
+    for (auto fn : files) {
+        std::ifstream f(dir + "/" + fn);
+        if (!f) continue;
+        std::string line, cls;
+        while (std::getline(f, line)) {
             if (line.find("class ") == 0 || line.find("class ") == 1) {
-                size_t nameStart = line.find("class ") + 6;
-                size_t nameEnd = line.find_first_of(" :", nameStart);
-                if (nameEnd != std::string::npos) {
-                    currentClass = line.substr(nameStart, nameEnd - nameStart);
-                }
+                size_t s = line.find("class ") + 6;
+                size_t e = line.find_first_of(" :", s);
+                if (e != std::string::npos) cls = line.substr(s, e - s);
             }
-
-            // Detect struct definition
             if (line.find("struct ") == 0) {
-                size_t nameStart = 7;
-                size_t nameEnd = line.find_first_of(" :", nameStart);
-                if (nameEnd != std::string::npos) {
-                    currentClass = line.substr(nameStart, nameEnd - nameStart);
-                }
+                size_t s = 7, e = line.find_first_of(" :", s);
+                if (e != std::string::npos) cls = line.substr(s, e - s);
             }
-
-            // Detect field with offset: "    type name;    // 0xXXXX (size: 0xY)"
-            if (!currentClass.empty() && line.find("// 0x") != std::string::npos) {
-                // Extract field name
-                size_t semicolon = line.find(';');
-                if (semicolon == std::string::npos) continue;
-
-                std::string beforeSemicolon = line.substr(0, semicolon);
-                // Field name is the last word before semicolon
-                size_t lastSpace = beforeSemicolon.find_last_of(" *&");
-                if (lastSpace == std::string::npos) continue;
-                std::string fieldName = beforeSemicolon.substr(lastSpace + 1);
-
-                // Extract offset
-                size_t offsetPos = line.find("// 0x");
-                if (offsetPos == std::string::npos) continue;
-                std::string offsetStr = line.substr(offsetPos + 5);
-                size_t offsetEnd = offsetStr.find_first_of(" (");
-                if (offsetEnd != std::string::npos) offsetStr = offsetStr.substr(0, offsetEnd);
-
-                uint64_t offset = strtoull(offsetStr.c_str(), nullptr, 16);
-
-                // Check if this matches any query
-                for (int i = 0; i < NUM_FIELDS; i++) {
-                    if (currentClass == FIELD_QUERIES[i].className &&
-                        fieldName == FIELD_QUERIES[i].fieldName) {
-                        offsets[FIELD_QUERIES[i].jsonKey] = offset;
-                        printf("  [SDK] %s::%s = 0x%llX\n",
-                            FIELD_QUERIES[i].className,
-                            FIELD_QUERIES[i].fieldName,
-                            (unsigned long long)offset);
-                    }
-                }
+            if (!cls.empty() && line.find("// 0x") != std::string::npos) {
+                size_t sc = line.find(';');
+                if (sc == std::string::npos) continue;
+                size_t ls = line.substr(0, sc).find_last_of(" *&");
+                if (ls == std::string::npos) continue;
+                std::string fld = line.substr(0, sc).substr(ls + 1);
+                size_t op = line.find("// 0x") + 5;
+                std::string os = line.substr(op);
+                size_t oe = os.find_first_of(" (");
+                if (oe != std::string::npos) os = os.substr(0, oe);
+                uint64_t off = strtoull(os.c_str(), nullptr, 16);
+                for (int i = 0; i < NF; i++)
+                    if (cls == FIELDS[i].cls && fld == FIELDS[i].field)
+                        r[FIELDS[i].key] = off;
             }
-
-            // Reset class on closing brace
-            if (line.find("};") == 0) {
-                currentClass.clear();
-            }
+            if (line.find("};") == 0) cls.clear();
         }
     }
-
-    return offsets;
+    return r;
 }
 
 // ============================================================================
-// 2. Find function offsets via PDB symbols
+// 2. PDB Symbol Loading
 // ============================================================================
+struct SC { std::map<std::string, uint64_t>* r; };
 
-struct SymbolContext {
-    std::map<std::string, uint64_t>* results;
-};
-
-BOOL CALLBACK EnumSymbolsCallback(PSYMBOL_INFO pSymInfo, ULONG, PVOID UserContext) {
-    auto* ctx = static_cast<SymbolContext*>(UserContext);
-    std::string name(pSymInfo->Name);
-
-    for (int i = 0; i < NUM_FUNCS; i++) {
-        std::string target = std::string(FUNC_QUERIES[i].className) + "::" + FUNC_QUERIES[i].funcName;
-
-        // Check for exact match (not exec variant)
-        if (name.find(target) != std::string::npos &&
-            name.find("exec") == std::string::npos &&
-            name.find("Z_Construct") == std::string::npos) {
-
-            // Check it's not already found (prefer shorter/exact match)
-            if (ctx->results->find(FUNC_QUERIES[i].jsonKey) == ctx->results->end()) {
-                uint64_t offset = pSymInfo->Address - 0x10000000;
-                (*ctx->results)[FUNC_QUERIES[i].jsonKey] = offset;
-                printf("  [PDB] %s = 0x%llX\n", target.c_str(), (unsigned long long)offset);
-            }
+BOOL CALLBACK SymCB(PSYMBOL_INFO si, ULONG, PVOID ctx) {
+    auto* c = (SC*)ctx;
+    std::string n(si->Name);
+    for (int i = 0; i < NFn; i++) {
+        std::string t = std::string(FUNCS[i].cls) + "::" + FUNCS[i].func;
+        if (n.find(t) != std::string::npos &&
+            n.find("exec") == std::string::npos &&
+            n.find("Z_Construct") == std::string::npos &&
+            n.find("dtor") == std::string::npos &&
+            n.find("Statics") == std::string::npos &&
+            n.find("NewProp") == std::string::npos) {
+            if (c->r->find(FUNCS[i].key) == c->r->end())
+                (*c->r)[FUNCS[i].key] = si->Address - 0x10000000;
         }
     }
     return TRUE;
 }
 
-std::map<std::string, uint64_t> findFunctionOffsets(const std::string& exePath) {
-    std::map<std::string, uint64_t> offsets;
-
-    // Load the exe as a data file for symbol enumeration
-    HANDLE hProcess = GetCurrentProcess();
+std::map<std::string, uint64_t> loadPDB(const std::string& exe) {
+    std::map<std::string, uint64_t> r;
+    HANDLE h = GetCurrentProcess();
     SymSetOptions(SYMOPT_DEFERRED_LOADS | SYMOPT_UNDNAME);
-
-    if (!SymInitialize(hProcess, nullptr, FALSE)) {
-        printf("[ERROR] SymInitialize failed: %lu\n", GetLastError());
-        return offsets;
-    }
-
-    DWORD64 baseAddr = SymLoadModuleEx(hProcess, nullptr, exePath.c_str(), nullptr,
-        0x10000000, 0, nullptr, 0);
-
-    if (!baseAddr) {
-        printf("[ERROR] SymLoadModuleEx failed: %lu\n", GetLastError());
-        printf("[HINT] Make sure the .pdb file is next to the .exe\n");
-        SymCleanup(hProcess);
-        return offsets;
-    }
-
-    printf("  [PDB] Module loaded at base 0x%llX\n", (unsigned long long)baseAddr);
-
-    SymbolContext ctx = { &offsets };
-    SymEnumSymbols(hProcess, baseAddr, "*", EnumSymbolsCallback, &ctx);
-
-    // Offsets are already relative from SymEnumSymbols
-    // pSymInfo->Address is virtual, ModBase is our fake base
-    // The offset = Address - ModBase, which is what we stored
-
-    SymUnloadModule64(hProcess, baseAddr);
-    SymCleanup(hProcess);
-
-    return offsets;
+    if (!SymInitialize(h, nullptr, FALSE)) return r;
+    DWORD64 b = SymLoadModuleEx(h, nullptr, exe.c_str(), nullptr, 0x10000000, 0, nullptr, 0);
+    if (!b) { SymCleanup(h); return r; }
+    SC ctx = {&r};
+    SymEnumSymbols(h, b, "*", SymCB, &ctx);
+    SymUnloadModule64(h, b);
+    SymCleanup(h);
+    return r;
 }
 
 // ============================================================================
-// 3. AOB signature verification
+// 3. Binary Scanner
 // ============================================================================
-
-struct AOBQuery {
-    const char* name;
-    const char* pattern;
-    const char* jsonKey;
-};
-
-static const AOBQuery AOB_QUERIES[] = {
-    {"GWorld", "48 8B 1D ?? ?? ?? ?? 48 85 DB 74", "aobGWorld"},
-    {"SetHealth write", "79 04 33 ?? EB 09 41 8B ?? 41 3B ?? 0F 4C ?? 89 ?? D8 01 00 00", "aobSetHealth"},
-    {"ConsumeItem sub", "48 3B F9 75 F2 44 29 66 04 E9", "aobConsumeItem"},
-};
-
-static const int NUM_AOBS = sizeof(AOB_QUERIES) / sizeof(AOB_QUERIES[0]);
-
-std::map<std::string, std::string> verifyAOBs(const std::string& exePath) {
-    std::map<std::string, std::string> results;
-
-    // Read .text section
-    FILE* f = fopen(exePath.c_str(), "rb");
-    if (!f) return results;
-
+bool loadText(const std::string& exe) {
+    FILE* f = fopen(exe.c_str(), "rb");
+    if (!f) return false;
     uint8_t hdr[4096];
-    fread(hdr, 1, sizeof(hdr), f);
-
-    uint32_t peOff = *(uint32_t*)(hdr + 0x3C);
-    uint16_t numSec = *(uint16_t*)(hdr + peOff + 6);
-    uint16_t optSize = *(uint16_t*)(hdr + peOff + 0x14);
-    uint32_t secOff = peOff + 0x18 + optSize;
-
-    for (int i = 0; i < numSec; i++) {
-        uint8_t* s = hdr + secOff + i * 40;
+    fread(hdr, 1, 4096, f);
+    uint32_t pe = *(uint32_t*)(hdr + 0x3C);
+    uint16_t ns = *(uint16_t*)(hdr + pe + 6);
+    uint16_t os = *(uint16_t*)(hdr + pe + 0x14);
+    uint32_t so = pe + 0x18 + os;
+    for (int i = 0; i < ns; i++) {
+        uint8_t* s = hdr + so + i * 40;
         if (memcmp(s, ".text", 5) == 0) {
-            uint32_t rawSize = *(uint32_t*)(s + 16);
-            uint32_t rawOff = *(uint32_t*)(s + 20);
-
-            std::vector<uint8_t> text(rawSize);
-            fseek(f, rawOff, SEEK_SET);
-            fread(text.data(), 1, rawSize, f);
+            uint32_t rsz = *(uint32_t*)(s + 16);
+            uint32_t ro = *(uint32_t*)(s + 20);
+            g_text.resize(rsz);
+            fseek(f, ro, SEEK_SET);
+            fread(g_text.data(), 1, rsz, f);
             fclose(f);
+            return true;
+        }
+    }
+    fclose(f);
+    return false;
+}
 
-            for (int q = 0; q < NUM_AOBS; q++) {
-                // Parse pattern
-                std::vector<uint8_t> bytes;
-                std::vector<bool> mask;
-                const char* p = AOB_QUERIES[q].pattern;
-                while (*p) {
-                    if (*p == ' ') { p++; continue; }
-                    if (*p == '?') {
-                        bytes.push_back(0); mask.push_back(false);
-                        p++; if (*p == '?') p++;
-                    } else {
-                        char h[3] = {p[0], p[1], 0};
-                        bytes.push_back((uint8_t)strtoul(h, 0, 16));
-                        mask.push_back(true);
-                        p += 2;
-                    }
-                }
+int64_t scanAOB(const char* pat) {
+    std::vector<uint8_t> by;
+    std::vector<bool> mk;
+    const char* p = pat;
+    while (*p) {
+        if (*p == ' ') { p++; continue; }
+        if (*p == '?') {
+            by.push_back(0); mk.push_back(false);
+            p++; if (*p == '?') p++;
+        } else {
+            char h[3] = {p[0], p[1], 0};
+            by.push_back((uint8_t)strtoul(h, nullptr, 16));
+            mk.push_back(true);
+            p += 2;
+        }
+    }
+    for (size_t i = 0; i + by.size() <= g_text.size(); i++) {
+        bool ok = true;
+        for (size_t j = 0; j < by.size(); j++)
+            if (mk[j] && g_text[i + j] != by[j]) { ok = false; break; }
+        if (ok) return (int64_t)i;
+    }
+    return -1;
+}
 
-                // Scan
-                bool found = false;
-                for (size_t j = 0; j + bytes.size() <= rawSize; j++) {
-                    bool ok = true;
-                    for (size_t k = 0; k < bytes.size(); k++) {
-                        if (mask[k] && text[j + k] != bytes[k]) { ok = false; break; }
-                    }
-                    if (ok) {
-                        results[AOB_QUERIES[q].jsonKey] = AOB_QUERIES[q].pattern;
-                        printf("  [AOB] %s: FOUND at +0x%llX\n", AOB_QUERIES[q].name, (unsigned long long)j);
-                        found = true;
-                        break;
-                    }
-                }
-                if (!found) {
-                    printf("  [AOB] %s: NOT FOUND - pattern may need updating\n", AOB_QUERIES[q].name);
-                    results[AOB_QUERIES[q].jsonKey] = "BROKEN";
-                }
+// Try to make a unique AOB from bytes at offset
+std::string makeUniqueAOB(size_t offset, int minLen, int maxLen) {
+    for (int len = minLen; len <= maxLen; len++) {
+        if (offset + len > g_text.size()) break;
+        int matches = 0;
+        for (size_t j = 0; j + len <= g_text.size() && matches < 2; j++) {
+            bool ok = true;
+            for (int k = 0; k < len; k++)
+                if (g_text[offset + k] != g_text[j + k]) { ok = false; break; }
+            if (ok) matches++;
+        }
+        if (matches == 1) {
+            std::string aob;
+            for (int k = 0; k < len; k++) {
+                char h[4];
+                sprintf(h, "%02X ", g_text[offset + k]);
+                aob += h;
             }
-            return results;
+            if (!aob.empty()) aob.pop_back();
+            return aob;
+        }
+    }
+    return "";
+}
+
+// Find write instruction AOB for a field offset
+// Searches for: mov [reg+disp32], reg32 = 89 ModRM disp32
+std::string findWriteAOB(uint64_t fieldOff) {
+    if (fieldOff > 0xFFFF) return "";
+    uint8_t lo = fieldOff & 0xFF;
+    uint8_t hi = (fieldOff >> 8) & 0xFF;
+
+    for (size_t i = 0; i + 6 < g_text.size(); i++) {
+        // 89 XX lo hi 00 00 = mov [reg+offset], r32
+        if (g_text[i] == 0x89 && g_text[i + 2] == lo && g_text[i + 3] == hi &&
+            g_text[i + 4] == 0x00 && g_text[i + 5] == 0x00) {
+            uint8_t modrm = g_text[i + 1];
+            if (((modrm >> 6) & 3) != 2 || (modrm & 7) == 4) continue;
+
+            // Build unique AOB starting 8 bytes before
+            size_t start = (i >= 8) ? i - 8 : 0;
+            std::string aob = makeUniqueAOB(start, 14, 24);
+            if (!aob.empty()) return aob;
         }
     }
 
-    fclose(f);
-    return results;
+    // Also try float write: F3 0F 11 XX lo hi 00 00 = movss [reg+offset], xmm
+    for (size_t i = 0; i + 8 < g_text.size(); i++) {
+        if (g_text[i] == 0xF3 && g_text[i + 1] == 0x0F && g_text[i + 2] == 0x11 &&
+            g_text[i + 4] == lo && g_text[i + 5] == hi &&
+            g_text[i + 6] == 0x00 && g_text[i + 7] == 0x00) {
+            uint8_t modrm = g_text[i + 3];
+            if (((modrm >> 6) & 3) != 2 || (modrm & 7) == 4) continue;
+
+            size_t start = (i >= 6) ? i - 6 : 0;
+            std::string aob = makeUniqueAOB(start, 14, 24);
+            if (!aob.empty()) return aob;
+        }
+    }
+    return "";
+}
+
+// Find function prologue AOB
+std::string findFuncAOB(uint64_t funcOff) {
+    if (funcOff >= g_text.size() || funcOff == 0) return "";
+    return makeUniqueAOB(funcOff, 12, 24);
 }
 
 // ============================================================================
-// 4. Output JSON
+// JSON Output
 // ============================================================================
+void writeJSON(const std::string& path,
+    const std::map<std::string, uint64_t>& sdk,
+    const std::map<std::string, uint64_t>& funcs,
+    const std::map<std::string, std::string>& sigs,
+    const std::map<std::string, std::string>& wAOBs,
+    const std::map<std::string, std::string>& fAOBs) {
 
-void writeOffsetsJson(const std::string& outputPath,
-    const std::map<std::string, uint64_t>& sdkOffsets,
-    const std::map<std::string, uint64_t>& funcOffsets,
-    const std::map<std::string, std::string>& aobResults) {
+    std::ofstream o(path);
+    o << "{\n";
+    o << "  \"game\": \"Icarus\",\n";
+    o << "  \"timestamp\": \"" << __DATE__ << " " << __TIME__ << "\",\n";
 
-    std::ofstream out(outputPath);
-    out << "{\n";
-    out << "  \"version\": \"auto-generated\",\n";
-    out << "  \"game\": \"Icarus\",\n";
-    out << "  \"timestamp\": \"" << __DATE__ << " " << __TIME__ << "\",\n";
-
-    // SDK offsets (hex strings for readability)
-    out << "\n  \"sdk\": {\n";
+    // SDK
+    o << "\n  \"sdk\": {\n";
     int i = 0;
-    for (auto& [key, val] : sdkOffsets) {
-        char hex[32];
-        sprintf(hex, "\"0x%X\"", (unsigned)val);
-        out << "    \"" << key << "\": " << hex;
-        if (++i < (int)sdkOffsets.size()) out << ",";
-        out << "\n";
+    for (auto& [k, v] : sdk) {
+        char h[32]; sprintf(h, "\"0x%X\"", (unsigned)v);
+        o << "    \"" << k << "\": " << h;
+        if (++i < (int)sdk.size()) o << ",";
+        o << "\n";
     }
-    out << "  },\n";
+    o << "  },\n";
 
-    // Function offsets (hex strings)
-    out << "\n  \"functions\": {\n";
+    // Functions
+    o << "\n  \"functions\": {\n";
     i = 0;
-    for (auto& [key, val] : funcOffsets) {
-        char hex[32];
-        sprintf(hex, "\"0x%X\"", (unsigned)val);
-        out << "    \"" << key << "\": " << hex;
-        if (++i < (int)funcOffsets.size()) out << ",";
-        out << "\n";
+    for (auto& [k, v] : funcs) {
+        char h[32]; sprintf(h, "\"0x%X\"", (unsigned)v);
+        o << "    \"" << k << "\": " << h;
+        if (++i < (int)funcs.size()) o << ",";
+        o << "\n";
     }
-    out << "  },\n";
+    o << "  },\n";
 
-    // AOB signatures
-    out << "\n  \"signatures\": {\n";
+    // Known signatures
+    o << "\n  \"signatures\": {\n";
     i = 0;
-    for (auto& [key, val] : aobResults) {
-        out << "    \"" << key << "\": \"" << val << "\"";
-        if (++i < (int)aobResults.size()) out << ",";
-        out << "\n";
+    for (auto& [k, v] : sigs) {
+        o << "    \"" << k << "\": \"" << v << "\"";
+        if (++i < (int)sigs.size()) o << ",";
+        o << "\n";
     }
-    out << "  }\n";
+    o << "  },\n";
 
-    out << "}\n";
-    out.close();
+    // Write AOBs
+    o << "\n  \"writeAOBs\": {\n";
+    i = 0;
+    for (auto& [k, v] : wAOBs) {
+        o << "    \"" << k << "\": \"" << v << "\"";
+        if (++i < (int)wAOBs.size()) o << ",";
+        o << "\n";
+    }
+    o << "  },\n";
 
-    printf("\n[DONE] Offsets written to: %s\n", outputPath.c_str());
+    // Function AOBs
+    o << "\n  \"functionAOBs\": {\n";
+    i = 0;
+    for (auto& [k, v] : fAOBs) {
+        o << "    \"" << k << "\": \"" << v << "\"";
+        if (++i < (int)fAOBs.size()) o << ",";
+        o << "\n";
+    }
+    o << "  }\n";
+    o << "}\n";
 }
 
 // ============================================================================
 // Main
 // ============================================================================
-
 int main(int argc, char* argv[]) {
     printf("============================================================\n");
-    printf("  ZeusMod Auto Dumper\n");
-    printf("  Finds all offsets and signatures automatically\n");
+    printf("  IcarusDumper - Auto Offset & AOB Finder\n");
+    printf("  Made by CyberSnake\n");
     printf("============================================================\n\n");
 
-    GameConfig cfg;
-    cfg.gamePath = "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Icarus\\Icarus\\Binaries\\Win64";
-    cfg.dumpPath = cfg.gamePath + "\\ue4ss\\CXXHeaderDump";
+    std::string gp = "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Icarus\\Icarus\\Binaries\\Win64";
+    std::string dp = gp + "\\ue4ss\\CXXHeaderDump";
 
-    // Parse args
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--game-path") == 0 && i + 1 < argc) cfg.gamePath = argv[++i];
-        if (strcmp(argv[i], "--dump-path") == 0 && i + 1 < argc) cfg.dumpPath = argv[++i];
+        if (!strcmp(argv[i], "--game-path") && i + 1 < argc) gp = argv[++i];
+        if (!strcmp(argv[i], "--dump-path") && i + 1 < argc) dp = argv[++i];
     }
 
-    std::string exePath = cfg.gamePath + "\\" + cfg.exeName;
+    std::string exe = gp + "\\Icarus-Win64-Shipping.exe";
 
-    printf("[1/3] Parsing UE4SS SDK dump...\n");
-    printf("  Path: %s\n", cfg.dumpPath.c_str());
-    auto sdkOffsets = parseUE4SSHeaders(cfg.dumpPath);
-    printf("  Found %zu SDK offsets\n\n", sdkOffsets.size());
+    // Step 1: SDK
+    printf("[1/4] Parsing UE4SS headers...\n");
+    auto sdk = parseHeaders(dp);
+    printf("  Found %zu/%d offsets\n", sdk.size(), NF);
+    for (auto& [k, v] : sdk)
+        printf("  %-28s = 0x%X\n", k.c_str(), (unsigned)v);
 
-    printf("[2/3] Loading PDB symbols...\n");
-    printf("  Exe: %s\n", exePath.c_str());
-    auto funcOffsets = findFunctionOffsets(exePath);
-    printf("  Found %zu function offsets\n\n", funcOffsets.size());
+    // Step 2: PDB
+    printf("\n[2/4] Loading PDB symbols...\n");
+    auto funcs = loadPDB(exe);
+    printf("  Found %zu/%d functions\n", funcs.size(), NFn);
+    for (auto& [k, v] : funcs)
+        printf("  %-28s = 0x%X\n", k.c_str(), (unsigned)v);
 
-    printf("[3/3] Verifying AOB signatures...\n");
-    auto aobResults = verifyAOBs(exePath);
-    printf("  Verified %zu signatures\n\n", aobResults.size());
+    // Step 3: Binary
+    printf("\n[3/4] Verifying known AOBs...\n");
+    if (!loadText(exe)) {
+        printf("  ERROR: Cannot load binary\n");
+        system("pause");
+        return 1;
+    }
+    printf("  .text: %.1f MB\n", g_text.size() / 1048576.0);
+
+    std::map<std::string, std::string> sigs;
+    for (int q = 0; q < NA; q++) {
+        int64_t pos = scanAOB(AOBS[q].pat);
+        sigs[AOBS[q].key] = (pos >= 0) ? AOBS[q].pat : "BROKEN";
+        printf("  %-20s %s", AOBS[q].name, pos >= 0 ? "OK" : "BROKEN");
+        if (pos >= 0) printf(" (at +0x%llX)", (unsigned long long)pos);
+        printf("\n");
+    }
+
+    // Step 4: Generate AOBs
+    printf("\n[4/4] Generating AOBs...\n");
+
+    printf("\n  Write instruction AOBs:\n");
+    std::map<std::string, std::string> wAOBs;
+    for (auto& [k, off] : sdk) {
+        std::string a = findWriteAOB(off);
+        if (!a.empty()) {
+            wAOBs[k] = a;
+            printf("    %-25s %s\n", k.c_str(), a.c_str());
+        }
+    }
+
+    printf("\n  Function prologue AOBs:\n");
+    std::map<std::string, std::string> fAOBs;
+    for (auto& [k, off] : funcs) {
+        std::string a = findFuncAOB(off);
+        if (!a.empty()) {
+            fAOBs[k] = a;
+            printf("    %-25s %.55s%s\n", k.c_str(), a.c_str(), a.size() > 55 ? "..." : "");
+        }
+    }
 
     // Output
-    std::string outputPath = "offsets.json";
-    writeOffsetsJson(outputPath, sdkOffsets, funcOffsets, aobResults);
+    writeJSON("offsets.json", sdk, funcs, sigs, wAOBs, fAOBs);
 
     // Summary
     printf("\n============================================================\n");
     printf("  SUMMARY\n");
     printf("============================================================\n");
-    printf("  SDK offsets:  %zu / %d\n", sdkOffsets.size(), NUM_FIELDS);
-    printf("  Functions:    %zu / %d\n", funcOffsets.size(), NUM_FUNCS);
-    printf("  Signatures:   %zu / %d\n", aobResults.size(), NUM_AOBS);
+    printf("  SDK offsets:     %zu / %d\n", sdk.size(), NF);
+    printf("  Functions:       %zu / %d\n", funcs.size(), NFn);
+    printf("  Known sigs:      %zu / %d\n", sigs.size(), NA);
+    printf("  Write AOBs:      %zu generated\n", wAOBs.size());
+    printf("  Function AOBs:   %zu generated\n", fAOBs.size());
 
     int broken = 0;
-    for (auto& [k, v] : aobResults) if (v == "BROKEN") broken++;
-    if (broken > 0) {
-        printf("\n  WARNING: %d signature(s) BROKEN - need manual update!\n", broken);
-    } else {
-        printf("\n  All signatures valid!\n");
-    }
-
+    for (auto& [k, v] : sigs) if (v == "BROKEN") broken++;
+    printf("  %s\n", broken ? "WARNING: Some signatures BROKEN!" : "All signatures valid!");
     printf("============================================================\n");
+    printf("\n  Output: offsets.json\n\n");
     system("pause");
     return 0;
 }
