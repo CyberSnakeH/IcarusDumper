@@ -506,6 +506,72 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // Step 5: Verify all generated AOBs
+    printf("\n[5/5] Verifying generated AOBs...\n");
+    int verifyOK = 0, verifyFail = 0;
+
+    printf("\n  Write AOBs verification:\n");
+    for (auto& [k, aob] : wAOBs) {
+        int64_t pos = scanAOB(aob.c_str());
+        if (pos >= 0) {
+            // Check uniqueness: scan for second match
+            int matches = 0;
+            // Quick recount by scanning full pattern
+            const char* p = aob.c_str();
+            std::vector<uint8_t> by; std::vector<bool> mk;
+            while (*p) {
+                if (*p==' ') { p++; continue; }
+                if (*p=='?') { by.push_back(0); mk.push_back(false); p++; if (*p=='?') p++; }
+                else { char h[3]={p[0],p[1],0}; by.push_back((uint8_t)strtoul(h,0,16)); mk.push_back(true); p+=2; }
+            }
+            for (size_t j = 0; j + by.size() <= g_text.size(); j++) {
+                bool ok = true;
+                for (size_t x = 0; x < by.size(); x++) if (mk[x] && g_text[j+x] != by[x]) { ok=false; break; }
+                if (ok) matches++;
+                if (matches > 1) break;
+            }
+
+            if (matches == 1) {
+                printf("    %-25s OK (unique, at +0x%llX)\n", k.c_str(), (unsigned long long)pos);
+                verifyOK++;
+            } else {
+                printf("    %-25s WARN (%d matches, not unique!)\n", k.c_str(), matches);
+                wAOBs[k] = aob + " [NOT_UNIQUE:" + std::to_string(matches) + "]";
+                verifyFail++;
+            }
+        } else {
+            printf("    %-25s FAIL (not found in binary!)\n", k.c_str());
+            wAOBs[k] = "BROKEN";
+            verifyFail++;
+        }
+    }
+
+    printf("\n  Function AOBs verification:\n");
+    for (auto& [k, aob] : fAOBs) {
+        int64_t pos = scanAOB(aob.c_str());
+        if (pos >= 0) {
+            // Verify it points to the expected function offset
+            uint64_t expectedOff = funcs.count(k) ? funcs[k] : 0;
+            if (expectedOff > 0 && (uint64_t)pos == expectedOff) {
+                printf("    %-25s OK (exact match at +0x%llX)\n", k.c_str(), (unsigned long long)pos);
+                verifyOK++;
+            } else if (expectedOff > 0) {
+                printf("    %-25s WARN (found at +0x%llX, expected +0x%llX)\n",
+                    k.c_str(), (unsigned long long)pos, (unsigned long long)expectedOff);
+                verifyFail++;
+            } else {
+                printf("    %-25s OK (found at +0x%llX)\n", k.c_str(), (unsigned long long)pos);
+                verifyOK++;
+            }
+        } else {
+            printf("    %-25s FAIL (not found!)\n", k.c_str());
+            fAOBs[k] = "BROKEN";
+            verifyFail++;
+        }
+    }
+
+    printf("\n  Verified: %d OK, %d issues\n", verifyOK, verifyFail);
+
     // Output
     writeJSON("offsets.json", sdk, funcs, sigs, wAOBs, fAOBs);
 
