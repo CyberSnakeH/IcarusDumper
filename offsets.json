@@ -1,7 +1,6 @@
 {
-  "version": "auto-generated",
   "game": "Icarus",
-  "timestamp": "Apr  7 2026 00:25:39",
+  "timestamp": "Apr  7 2026 00:49:47",
 
   "sdk": {
     "actorTimeDilation": "0x98",
@@ -15,8 +14,12 @@
     "giLocalPlayers": "0x38",
     "gsTimeOfDay": "0x378",
     "health": "0x1D8",
+    "internalTemp": "0x34C",
+    "invCurrentWeight": "0xE8",
+    "invSlots": "0xF0",
     "level": "0x29C",
     "maxArmor": "0x1E4",
+    "maxFlySpeed": "0x198",
     "maxFood": "0x348",
     "maxHealth": "0x1DC",
     "maxOxygen": "0x338",
@@ -26,6 +29,7 @@
     "movementMode": "0x168",
     "oxygen": "0x328",
     "playerController": "0x30",
+    "radiation": "0x350",
     "shelter": "0x1E8",
     "stamina": "0x278",
     "totalXP": "0x280",
@@ -34,18 +38,81 @@
   },
 
   "functions": {
+    "fnAddStamina": "0x143AF30",
     "fnConsumeItem": "0x1904570",
+    "fnCostMultiplier": "0x1816F20",
+    "fnFallDamage": "0x146B970",
     "fnFindItemCount": "0x190EF30",
+    "fnGetItemCount": "0x19169B0",
     "fnGetTotalWeight": "0x191F9E0",
+    "fnRemoveItem": "0x1938F90",
     "fnScaledInputCount": "0x18167A0",
     "fnScaledResourceCount": "0x1816820",
-    "fnSetHealth": "0x46FC780",
-    "fnSetStamina": "0x1467980"
+    "fnSetArmor": "0x1466A70",
+    "fnSetFood": "0x149F7B0",
+    "fnSetHealth": "0x1466FB0",
+    "fnSetOxygen": "0x149F950",
+    "fnSetStamina": "0x1467980",
+    "fnSetWater": "0x149FCB0",
+    "fnTakeDamage": "0x14692A0"
   },
 
   "signatures": {
     "aobConsumeItem": "48 3B F9 75 F2 44 29 66 04 E9",
+    "aobGNames": "48 8D 05 ?? ?? ?? ?? EB ?? 48 8D 0D ?? ?? ?? ?? E8",
     "aobGWorld": "48 8B 1D ?? ?? ?? ?? 48 85 DB 74",
-    "aobSetHealth": "79 04 33 ?? EB 09 41 8B ?? 41 3B ?? 0F 4C ?? 89 ?? D8 01 00 00"
+    "aobSetHealth": "79 04 33 ?? EB 09 41 8B ?? 41 3B ?? 0F 4C ?? 89 ?? D8 01 00 00",
+    "aobSetStamina": "85 ?? 79 04 33 ?? EB 05 3B ?? 0F 4C ?? 89 ?? 78 02 00 00"
+  },
+
+  "writeAOBs": {
+    "actorTimeDilation": "0F AC C3 37 49 21 ?? 4C 89 ?? 98 00 00 00",
+    "aliveState": "89 ?? E8 FD 9F 00 00 48 89 ?? 10 02 00 00",
+    "armor": "66 89 ?? A0 01 ?? 00 66 89 ?? ?? 01 ?? 00",
+    "charActorState": "00 89 ?? A0 05 00 00 48 89 ?? A8 05 00 00",
+    "charMovement": "48 89 ?? 20 01 ?? 00 48 89 ?? 88 ?? 00 00",
+    "charStatContainer": "00 E8 3F 50 23 ?? 90 48 89 ?? A0 05 00 00",
+    "ctrlCharacter": "00 E8 93 65 23 ?? 90 48 89 ?? 60 02 00 00",
+    "food": "00 E8 3E 60 23 ?? 90 48 89 ?? 30 03 00 00",
+    "gsTimeOfDay": "66 89 ?? 74 03 00 00 48 89 ?? 78 03 00 00",
+    "health": "00 C6 86 58 04 00 00 00 89 ?? D8 01 ?? 00",
+    "internalTemp": "83 44 03 00 00 8B ?? 40 89 ?? 4C 03 00 00",
+    "invCurrentWeight": "4D 89 ?? E0 00 00 00 4D 89 ?? E8 00 00 00 EB",
+    "invSlots": "89 ?? C1 E8 05 83 C0 05 89 ?? F0 00 00 00 B9",
+    "level": "07 80 8B ?? 01 ?? 00 20 89 ?? 9C 02 00 00",
+    "maxArmor": "03 48 89 ?? E8 01 ?? 00 89 ?? E4 01 ?? 00",
+    "maxFlySpeed": "48 8D 0D 3D AC FF FF 48 89 ?? ?? 01 ?? 00",
+    "maxFood": "48 89 ?? 40 03 00 00 48 89 ?? 48 03 00 00 48 89 ?? 50 03 00 00 66",
+    "maxHealth": "D8 01 ?? 00 44 89 ?? 44 89 ?? DC 01 ?? 00",
+    "maxOxygen": "48 89 ?? 30 03 00 00 48 89 ?? 38 03 00 00 C7",
+    "maxStamina": "89 ?? 7E 02 00 00 66 41 89 ?? 7C 02 00 00",
+    "maxWalkSpeed": "AC 00 00 00 8B ?? 24 50 89 ?? 8C 01 ?? 00",
+    "maxWater": "00 E8 D5 5F 23 ?? 90 48 89 ?? 40 03 00 00",
+    "movementMode": "1F 00 8B ?? C0 01 ?? 00 89 ?? 68 01 ?? 00",
+    "oxygen": "48 89 ?? 20 03 00 00 48 89 ?? 28 03 00 00 48 89 ?? 38 03 00 00 48",
+    "radiation": "00 E8 6C 5F 23 ?? 90 48 89 ?? 50 03 00 00",
+    "shelter": "83 C2 07 48 C1 EA 03 48 89 ?? E8 01 ?? 00",
+    "stamina": "8D 55 01 ?? 00 08 66 41 89 ?? 78 02 00 00",
+    "totalXP": "4C 89 ?? 00 02 00 00 4C 89 ?? 80 02 00 00",
+    "water": "48 89 ?? 24 03 00 00 48 89 ?? 2C 03 00 00",
+    "worldGameState": "0F 7E E8 66 0F 7E E1 66 89 ?? 20 01 ?? 00"
+  },
+
+  "functionAOBs": {
+    "fnAddStamina": "C0 F3 0F 10 ?? 37 6E 3D 03 F3 0F 5E",
+    "fnConsumeItem": "54 24 70 49 8D 8D 38 01 ?? 00 E8 21",
+    "fnCostMultiplier": "40 48 8B ?? E8 B7 F8 C8 FF 84 C0 74",
+    "fnFallDamage": "10 44 24 20 0F 29 ?? E0 41 0F ?? 4C",
+    "fnFindItemCount": "15 D2 F2 0F 11 55 CF 41 8B ?? 24 28",
+    "fnGetItemCount": "00 00 C7 40 0C 01 ?? 00 00 48 8D 05 48 A3",
+    "fnRemoveItem": "30 89 ?? 24 48 85 ?? 75 07 44 89 ??",
+    "fnScaledInputCount": "00 48 8D 05 28 41 00 00 48 89 ?? 24",
+    "fnScaledResourceCount": "00 00 48 8D 8C 24 88 ?? ?? 00 E8 51",
+    "fnSetFood": "48 8B ?? 41 8B ?? 48 8B ?? E8 72 42",
+    "fnSetHealth": "74 24 30 0F 28 F2 48 8B ?? 48 8B ?? 48 85",
+    "fnSetOxygen": "89 ?? 24 60 48 8B ?? 48 89 ?? 80 48",
+    "fnSetStamina": "8B ?? 24 48 48 85 ?? 74 55 BA 70 00",
+    "fnSetWater": "C6 44 24 20 01 ?? 33 ?? 44 8B ?? 24",
+    "fnTakeDamage": "80 00 00 00 F2 0F 11 6C 24 78 44 89"
   }
 }
