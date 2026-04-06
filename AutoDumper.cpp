@@ -224,23 +224,94 @@ int64_t scanAOB(const char* pat) {
     return -1;
 }
 
-// Try to make a unique AOB from bytes at offset
+// Check if a byte position is likely a register-encoding byte (should be wildcarded)
+// Returns true for ModR/M bytes after common opcodes
+bool isRegisterByte(const uint8_t* data, size_t pos, size_t len) {
+    if (pos == 0) return false;
+
+    uint8_t prev = data[pos - 1];
+
+    // After single-byte opcodes that use ModR/M: 89,8B,88,8A,01,29,39,3B,85,87,31,33,09,0B,21,23
+    if (prev == 0x89 || prev == 0x8B || prev == 0x88 || prev == 0x8A ||
+        prev == 0x01 || prev == 0x29 || prev == 0x39 || prev == 0x3B ||
+        prev == 0x85 || prev == 0x87 || prev == 0x31 || prev == 0x33 ||
+        prev == 0x09 || prev == 0x0B || prev == 0x21 || prev == 0x23) {
+        return true;
+    }
+
+    // After REX prefix + opcode: 41 8B, 44 89, 41 3B, etc.
+    if (pos >= 2) {
+        uint8_t pp = data[pos - 2];
+        if ((pp >= 0x40 && pp <= 0x4F) && // REX prefix
+            (prev == 0x89 || prev == 0x8B || prev == 0x88 || prev == 0x8A ||
+             prev == 0x01 || prev == 0x29 || prev == 0x39 || prev == 0x3B ||
+             prev == 0x85 || prev == 0x31 || prev == 0x33 || prev == 0x0F)) {
+            return true;
+        }
+    }
+
+    // After SSE prefix F3 0F xx: movss, addss, subss, mulss etc.
+    if (pos >= 3 && data[pos - 3] == 0xF3 && data[pos - 2] == 0x0F) {
+        uint8_t op = data[pos - 1];
+        if (op == 0x10 || op == 0x11 || op == 0x58 || op == 0x5C ||
+            op == 0x59 || op == 0x2A || op == 0x2C || op == 0x5F ||
+            op == 0x5D || op == 0x51) {
+            return true;
+        }
+    }
+
+    // After 0F xx (two-byte opcode): cmovl, cmovge, etc.
+    if (pos >= 2 && data[pos - 2] == 0x0F) {
+        uint8_t op = data[pos - 1];
+        if ((op >= 0x40 && op <= 0x4F) || // cmovcc
+            op == 0xB6 || op == 0xB7 || op == 0xBE || op == 0xBF || // movzx/movsx
+            op == 0xAF || op == 0x2F || op == 0x57) { // imul, comiss, xorps
+            return true;
+        }
+    }
+
+    return false;
+}
+
+// Try to make a unique AOB from bytes at offset, with wildcards on register bytes
 std::string makeUniqueAOB(size_t offset, int minLen, int maxLen) {
+    if (offset + minLen > g_text.size()) return "";
+
+    const uint8_t* data = g_text.data() + offset;
+
     for (int len = minLen; len <= maxLen; len++) {
         if (offset + len > g_text.size()) break;
+
+        // Build pattern with wildcards
+        std::vector<uint8_t> pat(len);
+        std::vector<bool> mask(len, true);
+
+        for (int k = 0; k < len; k++) {
+            pat[k] = data[k];
+            if (isRegisterByte(data, k, len)) {
+                mask[k] = false; // wildcard
+            }
+        }
+
+        // Count matches
         int matches = 0;
         for (size_t j = 0; j + len <= g_text.size() && matches < 2; j++) {
             bool ok = true;
-            for (int k = 0; k < len; k++)
-                if (g_text[offset + k] != g_text[j + k]) { ok = false; break; }
+            for (int k = 0; k < len; k++) {
+                if (mask[k] && g_text[j + k] != pat[k]) { ok = false; break; }
+            }
             if (ok) matches++;
         }
+
         if (matches == 1) {
             std::string aob;
             for (int k = 0; k < len; k++) {
-                char h[4];
-                sprintf(h, "%02X ", g_text[offset + k]);
-                aob += h;
+                if (mask[k]) {
+                    char h[4]; sprintf(h, "%02X ", pat[k]);
+                    aob += h;
+                } else {
+                    aob += "?? ";
+                }
             }
             if (!aob.empty()) aob.pop_back();
             return aob;
