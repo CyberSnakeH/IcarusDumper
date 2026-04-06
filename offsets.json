@@ -1,0 +1,51 @@
+{
+  "version": "auto-generated",
+  "game": "Icarus",
+  "timestamp": "Apr  7 2026 00:25:39",
+
+  "sdk": {
+    "actorTimeDilation": "0x98",
+    "aliveState": "0x210",
+    "armor": "0x1E0",
+    "charActorState": "0x5A8",
+    "charMovement": "0x288",
+    "charStatContainer": "0x5A0",
+    "ctrlCharacter": "0x260",
+    "food": "0x330",
+    "giLocalPlayers": "0x38",
+    "gsTimeOfDay": "0x378",
+    "health": "0x1D8",
+    "level": "0x29C",
+    "maxArmor": "0x1E4",
+    "maxFood": "0x348",
+    "maxHealth": "0x1DC",
+    "maxOxygen": "0x338",
+    "maxStamina": "0x27C",
+    "maxWalkSpeed": "0x18C",
+    "maxWater": "0x340",
+    "movementMode": "0x168",
+    "oxygen": "0x328",
+    "playerController": "0x30",
+    "shelter": "0x1E8",
+    "stamina": "0x278",
+    "totalXP": "0x280",
+    "water": "0x32C",
+    "worldGameState": "0x120"
+  },
+
+  "functions": {
+    "fnConsumeItem": "0x1904570",
+    "fnFindItemCount": "0x190EF30",
+    "fnGetTotalWeight": "0x191F9E0",
+    "fnScaledInputCount": "0x18167A0",
+    "fnScaledResourceCount": "0x1816820",
+    "fnSetHealth": "0x46FC780",
+    "fnSetStamina": "0x1467980"
+  },
+
+  "signatures": {
+    "aobConsumeItem": "48 3B F9 75 F2 44 29 66 04 E9",
+    "aobGWorld": "48 8B 1D ?? ?? ?? ?? 48 85 DB 74",
+    "aobSetHealth": "79 04 33 ?? EB 09 41 8B ?? 41 3B ?? 0F 4C ?? 89 ?? D8 01 00 00"
+  }
+}

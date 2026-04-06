@@ -1,0 +1,8 @@
+x64/
+*.obj
+*.pdb
+*.lib
+*.user
+*.tlog/
+*.lastbuildstate
+.vs/
